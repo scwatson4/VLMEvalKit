@@ -1,0 +1,54 @@
+model:
+  model_name: oumi-ai/Molmo-7B-D-0924
+  torch_dtype_str: float32
+  model_max_length: 3072
+  trust_remote_code: true
+  attn_implementation: eager
+data:
+  train:
+    collator_name: vision_language_sft
+    collator_kwargs:
+      process_individually: true
+    use_torchdata: false
+    datasets:
+    - dataset_name: hf_vision
+      split: train
+      shuffle: true
+      seed: 2025
+      trust_remote_code: true
+      transform_num_workers: auto
+      dataset_kwargs:
+        hf_dataset_path: yosubshin/oumi-walton-exclude-geometry
+        image_column: image
+        question_column: problem
+        answer_column: solution
+        return_tensors: true
+        processor_name: oumi-ai/Molmo-7B-D-0924
+training:
+  output_dir: /media/volume/ICML_TESTING_NEW_MODELS/checkpoints/molmo_7b_seed2025
+  trainer_type: TRL_SFT
+  enable_gradient_checkpointing: false
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 1
+  num_train_epochs: 1
+  save_final_model: true
+  use_peft: false
+  ddp_find_unused_parameters: false
+  compile: false
+  mixed_precision_dtype: BF16
+  optimizer: adafactor
+  learning_rate: 2.0e-05
+  warmup_ratio: 0.03
+  weight_decay: 0.01
+  lr_scheduler_type: cosine
+  logging_steps: 5
+  save_steps: 0
+  dataloader_main_process_only: false
+  dataloader_num_workers: 2
+  dataloader_prefetch_factor: 8
+  include_performance_metrics: true
+  log_model_summary: false
+  enable_wandb: false
+  seed: 2025
+fsdp:
+  enable_fsdp: false
