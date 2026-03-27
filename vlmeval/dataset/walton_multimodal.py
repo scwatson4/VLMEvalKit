@@ -29,6 +29,8 @@ class WaltonMultimodalReasoning(ImageBaseDataset):
             model_path = model_name
             if model_name == "qwen3-4b":
                 model_path = "Qwen/Qwen3-4B-Instruct-2507"
+            elif model_name == "llama31-8b":
+                model_path = "meta-llama/Llama-3.1-8B-Instruct"
 
             # Initialize VLLM with appropriate settings
             gpu_count = torch.cuda.device_count()
