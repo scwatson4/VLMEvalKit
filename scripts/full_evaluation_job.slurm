@@ -13,10 +13,21 @@ module purge >/dev/null 2>&1 || true
 
 RESULTS_ROOT="${KOA_ML_RESULTS_ROOT:-$HOME/koa-results}"
 JOB_DIR="${KOA_RUN_DIR:-${RESULTS_ROOT}/${SLURM_JOB_ID}}"
+SHARED_CACHE_ROOT="${KOA_REMOTE_ROOT:-${HOME}/koa-remote}/cache"
+CACHE_ROOT="${KOA_CACHE_ROOT:-${SHARED_CACHE_ROOT}}"
 REPO_DIR="${JOB_DIR}/repo"
-RESULTS_DIR="${JOB_DIR}/results"
-mkdir -p "${REPO_DIR}"
-mkdir -p "${RESULTS_DIR}"
+RESULTS_DIR="${RESULTS_DIR:-${JOB_DIR}/results}"
+mkdir -p "${REPO_DIR}" "${RESULTS_DIR}" "${CACHE_ROOT}"
+
+export XDG_CACHE_HOME="${CACHE_ROOT}"
+export HF_HOME="${XDG_CACHE_HOME}/hf"
+export TRITON_CACHE_DIR="${XDG_CACHE_HOME}/triton"
+export TORCH_HOME="${XDG_CACHE_HOME}/torch"
+export PIP_CACHE_DIR="${XDG_CACHE_HOME}/pip"
+export TMPDIR="${XDG_CACHE_HOME}/tmp"
+export APPTAINER_CACHEDIR="${XDG_CACHE_HOME}/apptainer"
+mkdir -p "${HF_HOME}" "${TRITON_CACHE_DIR}" "${TORCH_HOME}" "${PIP_CACHE_DIR}" "${TMPDIR}" "${APPTAINER_CACHEDIR}"
+
 
 if [[ -d "${REPO_DIR}" ]]; then
   cd "${REPO_DIR}"
@@ -119,3 +130,11 @@ srun uv run run.py \
 #       --llm-backend openai --model gpt-4o-mini \
 #       --num-workers 8 \
 #       --verbose
+
+srun uv run scripts/dcvlr_standalone_scorer.py \
+      --benchmarks VMCBench_DEV LiveXivTQA OlympiadBench Omni3DBench atomic_dataset electro_dataset mechanics_dataset optics_dataset quantum_dataset statistics_dataset \
+      --input-dir "/home/yosubs/koa_scratch/VLMEvalKit/outputs/${CUSTOM_MODEL_SAFE}" \
+      --llm-backend qwen --model qwen3-4b \
+      --num-workers 8 \
+      --qwen-judge-batch-size 128 \
+      --verbose

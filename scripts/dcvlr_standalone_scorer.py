@@ -1,16 +1,3 @@
-#!/usr/bin/env python3
-# /// script
-# requires-python = ">=3.10"
-# dependencies = [
-#   "anthropic>=0.34",
-#   "numpy>=1.24,<2",
-#   "openai>=1.12",
-#   "openpyxl>=3.1",
-#   "pandas>=2.2",
-#   "sympy>=1.12",
-#   "tqdm>=4.66",
-# ]
-# ///
 """
 DCVLR Standalone Scorer
 
@@ -24,6 +11,12 @@ Usage:
         --llm-backend openai \
         --model gpt-4o-mini \
         --verbose
+
+    python scripts/dcvlr_standalone_scorer.py \
+        --benchmarks VMCBench_DEV \
+        --input-dir results/full/Qwen2.5-VL-7B-Instruct \
+        --llm-backend qwen \
+        --model qwen3-4b
 """
 
 import argparse
@@ -33,6 +26,7 @@ import os
 import re
 import random
 import sys
+import threading
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -66,6 +60,12 @@ try:
 except ImportError:
     ANTHROPIC_AVAILABLE = False
 
+try:
+    from vllm import LLM, SamplingParams
+    VLLM_AVAILABLE = True
+except ImportError:
+    VLLM_AVAILABLE = False
+
 # Yale Physics benchmarks
 YALE_PHYSICS_BENCHMARKS = [
     'atomic_dataset',
@@ -85,7 +85,8 @@ class VLMEvalKitScorer:
     def __init__(self, benchmarks: List[str], input_dir: str, output_dir: Optional[str] = None,
                  llm_backend: str = 'openai', model: str = 'gpt-4o-mini', 
                  api_key: Optional[str] = None, verbose: bool = False, max_samples: Optional[int] = None,
-                 resume: bool = False, num_workers: Optional[int] = None):
+                 resume: bool = False, num_workers: Optional[int] = None,
+                 qwen_judge_batch_size: int = 32):
         """
         Initialize the VMCBench scorer.
         
@@ -100,6 +101,7 @@ class VLMEvalKitScorer:
             max_samples: Maximum number of samples to process per benchmark (for testing)
             resume: Resume from existing results file by skipping processed samples
             num_workers: Number of worker threads for the scoring pipeline
+            qwen_judge_batch_size: Batch size for qwen/vLLM Stage 3 judging
         """
         self.benchmarks = benchmarks
         self.input_dir = Path(input_dir)
@@ -107,6 +109,7 @@ class VLMEvalKitScorer:
         self.verbose = verbose
         self.max_samples = max_samples
         self.resume = resume
+        self.qwen_judge_batch_size = max(1, qwen_judge_batch_size)
         self._invalid_char_pattern = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]')
         cpu_count = os.cpu_count() or 4
         if num_workers is None:
@@ -142,6 +145,8 @@ class VLMEvalKitScorer:
             if not ANTHROPIC_AVAILABLE:
                 raise ImportError("Anthropic library not available. Install with: pip install anthropic")
             return AnthropicJudge(model=model, api_key=api_key)
+        elif backend == 'qwen':
+            return QwenJudge(model=model, batch_size=self.qwen_judge_batch_size)
         else:
             raise ValueError(f"Unsupported LLM backend: {backend}")
     
@@ -1001,14 +1006,9 @@ class VLMEvalKitScorer:
         
         return None
 
-    def _process_single_row(self, row: pd.Series) -> Dict[str, Any]:
-        """Run the four-stage pipeline for a single row."""
-        row = row.copy()
-        prediction = str(row['prediction'])
-        answer = str(row['answer'])
-
-        choices_dict = self._extract_choices(row)
-        row_result: Dict[str, Any] = {
+    def _build_empty_row_result(self) -> Dict[str, Any]:
+        """Create the default result structure for a single row."""
+        return {
             'stage1_match': 0,
             'stage2_match': 0,
             'stage3_match': 0,
@@ -1017,6 +1017,57 @@ class VLMEvalKitScorer:
             'hit': 0,
             'stage_errors': ''
         }
+
+    def _finalize_row_result(
+        self,
+        row: pd.Series,
+        row_result: Dict[str, Any],
+        errors: List[str],
+        final_answer: Optional[str],
+        stage1_success: bool,
+        stage2_success: bool,
+        stage3_outcome: Optional[Tuple[str, bool, str]] = None,
+    ) -> Dict[str, Any]:
+        """Finalize row outputs after Stage 3 has either run or been skipped."""
+        answer = str(row['answer'])
+        stage3_success = False
+
+        if stage3_outcome is not None:
+            stage3_result, stage3_success, stage3_error = stage3_outcome
+            if stage3_success:
+                row_result['stage3_match'] = 1
+                final_answer = stage3_result
+            errors.append(f"Stage3: {stage3_error}")
+        else:
+            errors.append("Stage3: Skipped - Earlier stage succeeded")
+
+        if not (stage1_success or stage2_success or stage3_success):
+            final_answer = "NOMATCH"
+            row_result['stage4_match'] = 1
+            errors.append("Stage4: Fallback - NOMATCH")
+        else:
+            errors.append("Stage4: Not needed")
+
+        row_result['final_answer'] = self._sanitize_text(final_answer or "NOMATCH")
+
+        if 'answer_type' in row and row['answer_type'] == 'float':
+            score_result = self._calculate_mra_score(final_answer, answer)
+            row_result['hit'] = score_result['score']
+            row_result['mra_details'] = self._sanitize_text(score_result.get('mra_details', ''))
+        else:
+            row_result['hit'] = 1 if final_answer == answer else 0
+
+        row_result['stage_errors'] = self._sanitize_text(" | ".join(errors))
+        return row_result
+
+    def _process_row_until_stage2(self, row: pd.Series) -> Dict[str, Any]:
+        """Run Stage 1 and Stage 2 for a single row and defer Stage 3 if needed."""
+        row = row.copy()
+        prediction = str(row['prediction'])
+        answer = str(row['answer'])
+
+        choices_dict = self._extract_choices(row)
+        row_result = self._build_empty_row_result()
 
         errors = []
         final_answer = None
@@ -1046,40 +1097,154 @@ class VLMEvalKitScorer:
             errors.append("Stage2: Skipped - Stage 1 succeeded")
             stage2_success = False
 
-        if not (stage1_success or stage2_success):
+        needs_stage3 = not (stage1_success or stage2_success)
+        return {
+            'row': row,
+            'prediction': prediction,
+            'answer': answer,
+            'choices_dict': choices_dict,
+            'row_result': row_result,
+            'errors': errors,
+            'final_answer': final_answer,
+            'stage1_success': stage1_success,
+            'stage2_success': stage2_success,
+            'needs_stage3': needs_stage3,
+        }
+
+    def _process_single_row(self, row: pd.Series) -> Dict[str, Any]:
+        """Run the four-stage pipeline for a single row."""
+        partial = self._process_row_until_stage2(row)
+        stage3_outcome: Optional[Tuple[str, bool, str]] = None
+
+        if partial['needs_stage3']:
             try:
-                stage3_result, stage3_success, stage3_error = self.stage3_llm_judge(
-                    prediction, answer, choices_dict
+                stage3_outcome = self.stage3_llm_judge(
+                    partial['prediction'],
+                    partial['answer'],
+                    partial['choices_dict'],
                 )
-                if stage3_success:
-                    row_result['stage3_match'] = 1
-                    final_answer = stage3_result
-                errors.append(f"Stage3: {stage3_error}")
             except Exception as e:
-                errors.append(f"Stage3: ERROR - {str(e)}")
-                stage3_success = False
+                stage3_outcome = (
+                    partial['prediction'],
+                    False,
+                    f"Stage 3 judge error: {str(e)}",
+                )
+
+        return self._finalize_row_result(
+            row=partial['row'],
+            row_result=partial['row_result'],
+            errors=partial['errors'],
+            final_answer=partial['final_answer'],
+            stage1_success=partial['stage1_success'],
+            stage2_success=partial['stage2_success'],
+            stage3_outcome=stage3_outcome,
+        )
+
+    def _apply_four_stage_pipeline_with_batched_qwen(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Apply the pipeline while batching Stage 3 requests through the Qwen judge."""
+        total_rows = len(df)
+        worker_count = max(1, min(self.num_workers, total_rows))
+
+        self.logger.info(
+            "Applying 4-stage pipeline with batched Qwen Stage 3 using %d worker(s) for %d rows...",
+            worker_count,
+            total_rows,
+        )
+
+        if worker_count == 1:
+            row_source = (row for _, row in df.iterrows())
         else:
-            errors.append("Stage3: Skipped - Earlier stage succeeded")
-            stage3_success = False
+            row_source = [row for _, row in df.iterrows()]
 
-        if not (stage1_success or stage2_success or stage3_success):
-            final_answer = "NOMATCH"
-            row_result['stage4_match'] = 1
-            errors.append("Stage4: Fallback - NOMATCH")
+        executor = None
+        if worker_count == 1:
+            partial_iter = (self._process_row_until_stage2(row) for row in row_source)
         else:
-            errors.append("Stage4: Not needed")
+            executor = ThreadPoolExecutor(max_workers=worker_count)
+            partial_iter = executor.map(self._process_row_until_stage2, row_source)
 
-        row_result['final_answer'] = self._sanitize_text(final_answer or "NOMATCH")
+        partial_results: List[Dict[str, Any]] = []
+        try:
+            for partial in tqdm(
+                partial_iter,
+                total=total_rows,
+                desc="Processing rows (Stages 1-2)",
+            ):
+                partial_results.append(partial)
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=True)
 
-        if 'answer_type' in row and row['answer_type'] == 'float':
-            score_result = self._calculate_mra_score(final_answer, answer)
-            row_result['hit'] = score_result['score']
-            row_result['mra_details'] = self._sanitize_text(score_result.get('mra_details', ''))
-        else:
-            row_result['hit'] = 1 if final_answer == answer else 0
+        batch_size = getattr(self.llm_judge, "batch_size", 32)
+        finalized_results: List[Optional[Dict[str, Any]]] = [None] * total_rows
+        pending_indices: List[int] = []
+        pending_requests: List[Tuple[str, str, Optional[Dict[str, str]]]] = []
 
-        row_result['stage_errors'] = self._sanitize_text(" | ".join(errors))
-        return row_result
+        def flush_pending_batch():
+            nonlocal pending_indices, pending_requests
+            if not pending_requests:
+                return
+
+            try:
+                outcomes = self.llm_judge.judge_equivalence_batch(pending_requests)
+            except Exception as e:
+                outcomes = [
+                    (prediction, False, f"Qwen batch judge error: {str(e)}")
+                    for prediction, _, _ in pending_requests
+                ]
+
+            for idx, outcome in zip(pending_indices, outcomes):
+                partial = partial_results[idx]
+                finalized_results[idx] = self._finalize_row_result(
+                    row=partial['row'],
+                    row_result=partial['row_result'],
+                    errors=partial['errors'],
+                    final_answer=partial['final_answer'],
+                    stage1_success=partial['stage1_success'],
+                    stage2_success=partial['stage2_success'],
+                    stage3_outcome=outcome,
+                )
+
+            pending_indices = []
+            pending_requests = []
+
+        finalized_count = 0
+        for idx, partial in enumerate(
+            tqdm(partial_results, total=total_rows, desc="Processing rows (Stage 3 batch)")
+        ):
+            if partial['needs_stage3']:
+                pending_indices.append(idx)
+                pending_requests.append(
+                    (
+                        partial['prediction'],
+                        partial['answer'],
+                        partial['choices_dict'],
+                    )
+                )
+                if len(pending_requests) >= batch_size:
+                    flush_pending_batch()
+            else:
+                finalized_results[idx] = self._finalize_row_result(
+                    row=partial['row'],
+                    row_result=partial['row_result'],
+                    errors=partial['errors'],
+                    final_answer=partial['final_answer'],
+                    stage1_success=partial['stage1_success'],
+                    stage2_success=partial['stage2_success'],
+                    stage3_outcome=None,
+                )
+
+            while finalized_count < total_rows and finalized_results[finalized_count] is not None:
+                finalized_count += 1
+                if finalized_count % 100 == 0:
+                    ready_results = [res for res in finalized_results[:finalized_count] if res is not None]
+                    self._save_intermediate_results(df.iloc[:finalized_count], ready_results, finalized_count)
+
+        flush_pending_batch()
+
+        results = [res for res in finalized_results if res is not None]
+        results_df = pd.DataFrame(results)
+        return pd.concat([df, results_df], axis=1)
 
     def apply_four_stage_pipeline(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -1094,6 +1259,9 @@ class VLMEvalKitScorer:
         total_rows = len(df)
         if total_rows == 0:
             return df
+
+        if isinstance(self.llm_judge, QwenJudge):
+            return self._apply_four_stage_pipeline_with_batched_qwen(df)
 
         worker_count = max(1, min(self.num_workers, total_rows))
 
@@ -1555,6 +1723,54 @@ Focus on semantic meaning rather than exact text matching.
             Tuple of (extracted_answer, success, error_message)
         """
         raise NotImplementedError
+
+    def _build_user_prompt(
+        self,
+        prediction: str,
+        answer: str,
+        choices_dict: Optional[Dict[str, str]] = None,
+    ) -> str:
+        """Build the user prompt for a single equivalence request."""
+        if choices_dict and answer in choices_dict:
+            choices_context = "\n".join(
+                [f"{letter}: {value}" for letter, value in choices_dict.items()]
+            )
+            correct_choice_value = choices_dict[answer]
+
+            user_prompt = self.USER_PROMPT_WITH_CHOICES_TEMPLATE.replace(
+                "{prediction}", str(prediction)
+            )
+            user_prompt = user_prompt.replace("{answer}", str(answer))
+            user_prompt = user_prompt.replace("{choices_context}", choices_context)
+            user_prompt = user_prompt.replace(
+                "{correct_choice_value}", str(correct_choice_value)
+            )
+            return user_prompt
+
+        user_prompt = self.USER_PROMPT_TEMPLATE.replace("{prediction}", str(prediction))
+        user_prompt = user_prompt.replace("{answer}", str(answer))
+        return user_prompt
+
+    def _parse_judge_response(
+        self,
+        response_text: str,
+        prediction: str,
+        answer: str,
+    ) -> Tuple[str, bool, str]:
+        """Parse a judge response into the scorer's tuple format."""
+        try:
+            result = json.loads(response_text)
+            equivalent = result.get('equivalent', False)
+            reasoning = result.get('reasoning', 'No reasoning provided')
+
+            if equivalent:
+                return answer, True, f"LLM judge: equivalent - {reasoning}"
+            return prediction, False, f"LLM judge: not equivalent - {reasoning}"
+
+        except json.JSONDecodeError:
+            if 'true' in response_text.lower():
+                return answer, True, "LLM judge: equivalent (fallback parsing)"
+            return prediction, False, "LLM judge: not equivalent (fallback parsing)"
     
 
 class OpenAIJudge(LLMEquivalenceJudge):
@@ -1567,21 +1783,7 @@ class OpenAIJudge(LLMEquivalenceJudge):
     def judge_equivalence(self, prediction: str, answer: str, choices_dict: Optional[Dict[str, str]] = None) -> Tuple[str, bool, str]:
         """Judge equivalence using OpenAI API."""
         try:
-            # Choose appropriate template based on whether choices are available
-            if choices_dict and answer in choices_dict:
-                # Multiple choice context available
-                choices_context = "\n".join([f"{letter}: {value}" for letter, value in choices_dict.items()])
-                correct_choice_value = choices_dict[answer]
-                
-                user_prompt = self.USER_PROMPT_WITH_CHOICES_TEMPLATE.replace("{prediction}", str(prediction))
-                user_prompt = user_prompt.replace("{answer}", str(answer))
-                user_prompt = user_prompt.replace("{choices_context}", choices_context)
-                user_prompt = user_prompt.replace("{correct_choice_value}", str(correct_choice_value))
-            else:
-                # Standard template for non-multiple choice or when choices not available
-                user_prompt = self.USER_PROMPT_TEMPLATE.replace("{prediction}", str(prediction))
-                user_prompt = user_prompt.replace("{answer}", str(answer))
-            
+            user_prompt = self._build_user_prompt(prediction, answer, choices_dict)
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
@@ -1594,26 +1796,8 @@ class OpenAIJudge(LLMEquivalenceJudge):
                 # OpenAI models like gpt-4o-mini support up to 128k input tokens by default
             )
             
-            response_text = response.choices[0].message.content
-            
-            # Parse JSON response
-            try:
-                result = json.loads(response_text)
-                equivalent = result.get('equivalent', False)
-                reasoning = result.get('reasoning', 'No reasoning provided')
-                
-                if equivalent:
-                    return answer, True, f"LLM judge: equivalent - {reasoning}"
-                else:
-                    return prediction, False, f"LLM judge: not equivalent - {reasoning}"
-                    
-            except json.JSONDecodeError:
-                # Fallback: look for true/false in response
-                if 'true' in response_text.lower():
-                    return answer, True, "LLM judge: equivalent (fallback parsing)"
-                else:
-                    return prediction, False, "LLM judge: not equivalent (fallback parsing)"
-                    
+            response_text = response.choices[0].message.content or ""
+            return self._parse_judge_response(response_text, prediction, answer)
         except Exception as e:
             return prediction, False, f"OpenAI API error: {str(e)}"
 
@@ -1628,21 +1812,7 @@ class AnthropicJudge(LLMEquivalenceJudge):
     def judge_equivalence(self, prediction: str, answer: str, choices_dict: Optional[Dict[str, str]] = None) -> Tuple[str, bool, str]:
         """Judge equivalence using Anthropic API."""
         try:
-            # Choose appropriate template based on whether choices are available
-            if choices_dict and answer in choices_dict:
-                # Multiple choice context available
-                choices_context = "\n".join([f"{letter}: {value}" for letter, value in choices_dict.items()])
-                correct_choice_value = choices_dict[answer]
-                
-                user_prompt = self.USER_PROMPT_WITH_CHOICES_TEMPLATE.replace("{prediction}", str(prediction))
-                user_prompt = user_prompt.replace("{answer}", str(answer))
-                user_prompt = user_prompt.replace("{choices_context}", choices_context)
-                user_prompt = user_prompt.replace("{correct_choice_value}", str(correct_choice_value))
-            else:
-                # Standard template for non-multiple choice or when choices not available
-                user_prompt = self.USER_PROMPT_TEMPLATE.replace("{prediction}", str(prediction))
-                user_prompt = user_prompt.replace("{answer}", str(answer))
-            
+            user_prompt = self._build_user_prompt(prediction, answer, choices_dict)
             response = self.client.messages.create(
                 model=self.model,
                 system=self.SYSTEM_PROMPT,
@@ -1654,27 +1824,93 @@ class AnthropicJudge(LLMEquivalenceJudge):
             )
             
             response_text = response.content[0].text
-            
-            # Parse JSON response
-            try:
-                result = json.loads(response_text)
-                equivalent = result.get('equivalent', False)
-                reasoning = result.get('reasoning', 'No reasoning provided')
-                
-                if equivalent:
-                    return answer, True, f"LLM judge: equivalent - {reasoning}"
-                else:
-                    return prediction, False, f"LLM judge: not equivalent - {reasoning}"
-                    
-            except json.JSONDecodeError:
-                # Fallback: look for true/false in response
-                if 'true' in response_text.lower():
-                    return answer, True, "LLM judge: equivalent (fallback parsing)"
-                else:
-                    return prediction, False, "LLM judge: not equivalent (fallback parsing)"
-                    
+            return self._parse_judge_response(response_text, prediction, answer)
         except Exception as e:
             return prediction, False, f"Anthropic API error: {str(e)}"
+
+
+class QwenJudge(LLMEquivalenceJudge):
+    """vLLM-backed local equivalence judge for Qwen3-4B."""
+
+    SUPPORTED_MODEL = "qwen3-4b"
+    MODEL_PATH = "Qwen/Qwen3-4B-Instruct-2507"
+
+    def __init__(self, model: str = SUPPORTED_MODEL, batch_size: int = 32):
+        if model != self.SUPPORTED_MODEL:
+            raise ValueError(
+                f"Unsupported qwen judge model: {model}. Only '{self.SUPPORTED_MODEL}' is supported."
+            )
+        if not VLLM_AVAILABLE:
+            raise ImportError("vLLM library not available. Install with: pip install vllm")
+
+        try:
+            import torch
+            gpu_count = torch.cuda.device_count()
+        except Exception:
+            gpu_count = 1
+
+        tp_size = max(1, min(gpu_count, 4))
+        self.model = model
+        self.batch_size = max(1, batch_size)
+        self._lock = threading.Lock()
+        self._sampling_params = SamplingParams(
+            temperature=0.0,
+            max_tokens=512,
+            stop=None,
+        )
+        self._llm = LLM(
+            model=self.MODEL_PATH,
+            tensor_parallel_size=tp_size,
+            max_num_seqs=self.batch_size,
+            gpu_memory_utilization=0.9,
+            max_model_len=16384,
+        )
+
+    def _format_chat_prompt(self, user_prompt: str) -> str:
+        tokenizer = self._llm.get_tokenizer()
+        messages = [
+            {"role": "system", "content": self.SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ]
+        return tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+
+    def judge_equivalence_batch(
+        self,
+        requests: List[Tuple[str, str, Optional[Dict[str, str]]]],
+    ) -> List[Tuple[str, bool, str]]:
+        prompts = [
+            self._format_chat_prompt(
+                self._build_user_prompt(prediction, answer, choices_dict)
+            )
+            for prediction, answer, choices_dict in requests
+        ]
+
+        with self._lock:
+            outputs = self._llm.generate(prompts, self._sampling_params)
+
+        results: List[Tuple[str, bool, str]] = []
+        for (prediction, answer, _), output in zip(requests, outputs):
+            response_text = output.outputs[0].text if output.outputs else ""
+            results.append(self._parse_judge_response(response_text, prediction, answer))
+        return results
+
+    def judge_equivalence(
+        self,
+        prediction: str,
+        answer: str,
+        choices_dict: Optional[Dict[str, str]] = None,
+    ) -> Tuple[str, bool, str]:
+        """Judge equivalence using a local Qwen3-4B vLLM instance."""
+        try:
+            return self.judge_equivalence_batch(
+                [(prediction, answer, choices_dict)]
+            )[0]
+        except Exception as e:
+            return prediction, False, f"Qwen judge error: {str(e)}"
 
 
 def main():
@@ -1709,6 +1945,13 @@ Examples:
       --benchmarks VMCBench_DEV \\
       --input-dir results/full/Qwen2.5-VL-7B-Instruct \\
       --llm-backend anthropic --model claude-3-sonnet-20240229
+
+  # Process with local Qwen judge via vLLM
+  python scripts/vmcbench_standalone_scorer.py \\
+      --benchmarks VMCBench_DEV \\
+      --input-dir results/full/Qwen2.5-VL-7B-Instruct \\
+      --llm-backend qwen --model qwen3-4b \\
+      --qwen-judge-batch-size 64
         """
     )
     
@@ -1729,14 +1972,14 @@ Examples:
     )
     parser.add_argument(
         '--llm-backend',
-        choices=['openai', 'anthropic'],
+        choices=['openai', 'anthropic', 'qwen'],
         default='openai',
         help='LLM backend for Stage 3 equivalence checking'
     )
     parser.add_argument(
         '--model',
         default='gpt-4o-mini',
-        help='Model name for LLM judge'
+        help="Model name for LLM judge (for --llm-backend qwen, only 'qwen3-4b' is supported)"
     )
     parser.add_argument(
         '--api-key',
@@ -1762,6 +2005,12 @@ Examples:
         type=int,
         help='Number of worker threads for the scoring pipeline (defaults to min(8, CPU cores))'
     )
+    parser.add_argument(
+        '--qwen-judge-batch-size',
+        type=int,
+        default=32,
+        help='Batch size for qwen/vLLM Stage 3 judging (only used with --llm-backend qwen)'
+    )
     
     args = parser.parse_args()
     
@@ -1777,6 +2026,7 @@ Examples:
         max_samples=args.max_samples,
         resume=args.resume,
         num_workers=args.num_workers,
+        qwen_judge_batch_size=args.qwen_judge_batch_size,
     )
     
     scorer.process_all()
