@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#   "matplotlib>=3.8",
+#   "numpy>=1.24,<2",
+#   "pandas>=2.1",
+#   "Pillow>=10.3",
+#   "tqdm>=4.66",
+# ]
+# ///
 """
 Resize images in TSV file to maximum width while preserving aspect ratio.
 
