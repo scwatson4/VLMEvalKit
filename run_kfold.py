@@ -136,6 +136,12 @@ Usage:
         help="Batch size for judge evaluation (Walton/vLLM judge path)",
     )
     parser.add_argument(
+        "--walton-judge-impl",
+        choices=["default", "multistage"],
+        default="default",
+        help="WaltonMultimodalReasoning judge implementation to use during evaluation",
+    )
+    parser.add_argument(
         "--max-output-tokens",
         type=int,
         default=None,
@@ -1330,6 +1336,7 @@ def main():
                 "use_vllm_judge": use_vllm_judge,
                 "nproc": args.api_nproc if args.api_nproc else args.nproc,
                 "verbose": args.verbose,
+                "walton_judge_impl": args.walton_judge_impl,
             }
 
             df_evaluated = evaluate_kfold(

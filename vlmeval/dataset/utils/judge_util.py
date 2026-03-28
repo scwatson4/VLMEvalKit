@@ -9,7 +9,7 @@ def build_judge(**kwargs):
     model = kwargs.pop('model', None)
     # Remove VLMEvalKit control-plane kwargs before constructing a judge.
     # API-backed judges may forward unknown kwargs into request payloads.
-    for key in ['nproc', 'batch_size', 'use_vllm_judge']:
+    for key in ['nproc', 'batch_size', 'use_vllm_judge', 'walton_judge_impl']:
         kwargs.pop(key, None)
     load_env()
     LOCAL_LLM = os.environ.get('LOCAL_LLM', None)

@@ -1,5 +1,7 @@
 import os.path as osp
 import io
+import json
+import re
 import pandas as pd
 from PIL import Image
 from .image_base import ImageBaseDataset
@@ -146,6 +148,338 @@ class WaltonMultimodalReasoning(ImageBaseDataset):
         super().__init__(dataset, **kwargs)
         self.dataset_name = dataset
 
+    def _extract_answer_text(self, text):
+        """Extract a likely final answer string while preserving raw text elsewhere."""
+        if not isinstance(text, str):
+            return ""
+
+        pattern = r"\\boxed\{([^}]*)\}"
+        matches = re.findall(pattern, text)
+        if matches:
+            return matches[-1].strip()
+
+        tag_patterns = [
+            r"<ans>(.*?)</ans>",
+            r"<answer>(.*?)</answer>",
+            r"<final>(.*?)</final>",
+            r"\[ANSWER\](.*?)\[/ANSWER\]",
+        ]
+        for pattern in tag_patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+            if match:
+                return match.group(1).strip()
+
+        return text.strip()
+
+    def _extract_options_block(self, question_text):
+        if not isinstance(question_text, str):
+            return None
+        match = re.search(
+            r"\n(?:Choices|Options)\s*:?[\t ]*\n",
+            question_text,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return None
+        tail = question_text[match.end() :]
+        block_lines = []
+        for raw in tail.splitlines():
+            if raw.strip() == "":
+                break
+            block_lines.append(raw)
+        if not block_lines:
+            return None
+        return "\n".join(block_lines)
+
+    def _build_choice_map_for_qtext(self, question_text):
+        options_block = self._extract_options_block(question_text)
+        if not options_block:
+            return {}
+
+        lines = options_block.splitlines()
+        labeled_mapping = {}
+        labeled_found = False
+        for raw in lines:
+            match = re.match(r"^\s*(?:[-*•]\s*)?([A-Za-z])[\.)]\s*(.+)$", raw)
+            if match:
+                labeled_found = True
+                labeled_mapping[match.group(1).upper()] = match.group(2).strip()
+        if labeled_found and labeled_mapping:
+            return labeled_mapping
+
+        unlabeled_mapping = {}
+        base = ord("A")
+        for i, raw in enumerate(lines):
+            text = re.sub(r"^\s*[-*•]\s*", "", raw.strip())
+            unlabeled_mapping[chr(base + i)] = text
+        return unlabeled_mapping
+
+    def _normalize_answer_with_choices(self, answer, choice_map):
+        if not isinstance(answer, str):
+            return answer, None
+
+        stripped = answer.strip()
+        match = re.match(r"^\s*([A-Za-z])[\.)]\s*(.+)$", stripped)
+        if match:
+            label = match.group(1).upper()
+            rest = match.group(2).strip()
+            mapped = choice_map.get(label, rest) if isinstance(choice_map, dict) else rest
+            return label, mapped
+        if len(stripped) == 1 and stripped.upper() in choice_map:
+            return stripped.upper(), choice_map[stripped.upper()]
+        if len(stripped) == 2 and stripped[1] in ".)" and stripped[0].upper() in choice_map:
+            label = stripped[0].upper()
+            return label, choice_map[label]
+        return stripped, None
+
+    def _texts_match_basic(self, left, right):
+        if not isinstance(left, str) or not isinstance(right, str):
+            return False
+        left_norm = re.sub(r"\s+", " ", left).strip().lower()
+        right_norm = re.sub(r"\s+", " ", right).strip().lower()
+        return bool(left_norm) and left_norm == right_norm
+
+    def _deterministic_verdict(self, prediction, answer, question_text=None):
+        """Return 1 if deterministic normalization is sufficient, else None."""
+        raw_prediction = str(prediction)
+        raw_answer = str(answer)
+
+        if self._texts_match_basic(raw_prediction, raw_answer):
+            return 1
+
+        choice_map = self._build_choice_map_for_qtext(question_text)
+        extracted_prediction = self._extract_answer_text(raw_prediction)
+        extracted_answer = self._extract_answer_text(raw_answer)
+
+        if self._texts_match_basic(extracted_prediction, extracted_answer):
+            return 1
+
+        pred_label, pred_text = self._normalize_answer_with_choices(
+            extracted_prediction, choice_map
+        )
+        ans_label, ans_text = self._normalize_answer_with_choices(
+            extracted_answer, choice_map
+        )
+
+        if (
+            isinstance(pred_label, str)
+            and isinstance(ans_label, str)
+            and len(pred_label) == 1
+            and len(ans_label) == 1
+            and pred_label.upper() == ans_label.upper()
+        ):
+            return 1
+
+        if pred_text is not None and ans_text is not None and self._texts_match_basic(
+            pred_text, ans_text
+        ):
+            return 1
+
+        if self._texts_match_basic(extracted_prediction, raw_answer):
+            return 1
+
+        return None
+
+    def _create_multistage_judge_prompt(self, prediction, ground_truth, question_text=None):
+        options_block = self._extract_options_block(question_text)
+
+        prompt = """You are evaluating whether a model prediction should be counted as correct for a reasoning task.
+
+You must compare the model prediction against the ground truth answer for semantic or mathematical equivalence.
+The model prediction may include long reasoning traces and final answers wrapped in formats such as \\boxed{}, <ans></ans>, or similar tags. Extract the final answer internally if needed, but judge from the full raw prediction and full raw ground truth provided below.
+
+Question:
+"""
+        prompt += f"{question_text if isinstance(question_text, str) else ''}\n\n"
+        prompt += f"""Model Prediction (raw):
+{prediction}
+
+Ground Truth Answer (raw):
+{ground_truth}
+"""
+
+        if options_block:
+            prompt += f"\nMultiple Choice Options:\n{options_block}\n"
+
+        prompt += """
+Count answers as equivalent when they match in semantic meaning, mathematical value, units where appropriate, or correct multiple-choice label/content.
+
+Return EXACTLY one JSON object and nothing else:
+{"equivalent": true, "reasoning": "brief explanation"}
+or
+{"equivalent": false, "reasoning": "brief explanation"}
+"""
+        return prompt
+
+    def _parse_multistage_judge_response(self, response):
+        if not isinstance(response, str):
+            return 0
+
+        text = response.strip()
+        try:
+            if "```json" in text:
+                text = text.split("```json", 1)[1].split("```", 1)[0]
+            elif "```" in text:
+                text = text.split("```", 1)[1].split("```", 1)[0]
+            parsed = json.loads(text)
+            return 1 if parsed.get("equivalent", False) else 0
+        except Exception:
+            pass
+
+        match = re.search(r'\{[^}]*"equivalent"\s*:\s*(true|false)', response, flags=re.IGNORECASE)
+        if match:
+            return 1 if match.group(1).lower() == "true" else 0
+
+        lowered = text.lower()
+        if re.search(r"\bfalse\b", lowered) or re.search(r"\bnot equivalent\b", lowered):
+            return 0
+        if re.search(r"\btrue\b", lowered) or re.search(r"\bequivalent\b", lowered):
+            return 1
+        return 0
+
+    def _run_judge_generation_batch(
+        self,
+        judge_model,
+        prompts,
+        use_vllm_judge=False,
+        judge_nproc=4,
+    ):
+        if not prompts:
+            return []
+
+        if use_vllm_judge:
+            responses = judge_model.generate(prompts)
+            if not isinstance(responses, list):
+                responses = [responses]
+            return responses
+
+        if len(prompts) == 1:
+            return [judge_model.generate(prompts[0])]
+
+        if getattr(judge_model, "is_api", False) and judge_nproc > 1:
+            return track_progress_rich(
+                judge_model.generate,
+                [(prompt,) for prompt in prompts],
+                nproc=judge_nproc,
+            )
+
+        return [judge_model.generate(prompt) for prompt in prompts]
+
+    def _evaluate_multistage_judge(self, eval_file, judge_model=None, **judge_kwargs):
+        model = judge_kwargs.get("model", "gpt-4o-mini")
+        suffix = eval_file.split(".")[-1]
+        result_path = eval_file.replace(f".{suffix}", f"_{model}_judge.xlsx")
+        score_path = eval_file.replace(f".{suffix}", f"_{model}_score.csv")
+        batch_size = judge_kwargs.pop("batch_size", 32)
+        judge_nproc = max(1, int(judge_kwargs.get("nproc", 4)))
+
+        if not osp.exists(result_path):
+            data = load(eval_file)
+
+            if judge_model is None:
+                use_vllm_judge = judge_kwargs.get("use_vllm_judge", False)
+                judge_kwargs["model"] = model
+                if use_vllm_judge and not model.startswith("gpt"):
+                    judge_model = self._build_vllm_judge(
+                        model, batch_size=batch_size, **judge_kwargs
+                    )
+                else:
+                    judge_model = build_judge(**judge_kwargs)
+            else:
+                use_vllm_judge = hasattr(judge_model, "llm")
+
+            if hasattr(judge_model, "working"):
+                assert judge_model.working(), (
+                    "WaltonMultimodalReasoning evaluation requires a working judge model\n"
+                    + DEBUG_MESSAGE
+                )
+
+            logger = get_logger("WALTON_EVAL")
+            verdict_list = []
+            logged_sample = False
+
+            with tqdm(total=len(data), desc="Evaluating with multistage judge") as pbar:
+                for i in range(0, len(data), batch_size):
+                    batch_end = min(i + batch_size, len(data))
+                    batch_data = data.iloc[i:batch_end]
+
+                    batch_prompts = []
+                    judge_indices = []
+                    batch_verdicts = [0] * len(batch_data)
+
+                    for rel_idx, (_, row) in enumerate(batch_data.iterrows()):
+                        deterministic = self._deterministic_verdict(
+                            row.get("prediction", ""),
+                            row.get("answer", ""),
+                            row.get("question", None),
+                        )
+                        if deterministic is not None:
+                            batch_verdicts[rel_idx] = deterministic
+                            continue
+
+                        judge_indices.append(rel_idx)
+                        batch_prompts.append(
+                            self._create_multistage_judge_prompt(
+                                row.get("prediction", ""),
+                                row.get("answer", ""),
+                                row.get("question", None),
+                            )
+                        )
+
+                    try:
+                        batch_responses = self._run_judge_generation_batch(
+                            judge_model=judge_model,
+                            prompts=batch_prompts,
+                            use_vllm_judge=use_vllm_judge,
+                            judge_nproc=judge_nproc,
+                        )
+                    except Exception as e:
+                        print(f"Error in multistage judge generation: {e}")
+                        batch_responses = [""] * len(batch_prompts)
+
+                    for rel_idx, response in zip(judge_indices, batch_responses):
+                        batch_verdicts[rel_idx] = self._parse_multistage_judge_response(response)
+
+                    for rel_idx, (_, row) in enumerate(batch_data.iterrows()):
+                        deterministic = self._deterministic_verdict(
+                            row.get("prediction", ""),
+                            row.get("answer", ""),
+                            row.get("question", None),
+                        )
+                        if deterministic == 1 and batch_verdicts[rel_idx] == 0:
+                            batch_verdicts[rel_idx] = 1
+
+                    if not logged_sample and (batch_prompts or any(v == 1 for v in batch_verdicts)):
+                        try:
+                            logger.info("=== First multistage Walton judge batch ===")
+                            for j, prompt in enumerate(batch_prompts[:3]):
+                                resp = batch_responses[j] if j < len(batch_responses) else ""
+                                logger.info(
+                                    f"--- Judged Item (rel {judge_indices[j]}) ---\nPrompt:\n{prompt}\n\nResponse:\n{str(resp)}"
+                                )
+                        except Exception:
+                            pass
+                        logged_sample = True
+
+                    verdict_list.extend(batch_verdicts)
+                    pbar.update(batch_end - i)
+
+            data["verdict"] = verdict_list
+            dump(data, result_path)
+
+        data = load(result_path)
+        overall_acc = data["verdict"].mean() * 100
+        score_df = pd.DataFrame({"Metric": ["Overall Accuracy"], "Value": [overall_acc]})
+        dump(score_df, score_path)
+
+        ret = {"Overall": overall_acc}
+        if "category" in data.columns:
+            categories = data["category"].unique()
+            for cat in categories:
+                cat_data = data[data["category"] == cat]
+                ret[cat] = cat_data["verdict"].mean() * 100
+        return ret
+
     def _normalize_image_field(self, image_value):
         """Normalize Hugging Face image payloads into base64 strings for VLMEvalKit."""
         if image_value is None:
@@ -260,6 +594,12 @@ class WaltonMultimodalReasoning(ImageBaseDataset):
         return msgs
 
     def evaluate(self, eval_file, judge_model=None, **judge_kwargs):
+        walton_judge_impl = judge_kwargs.get("walton_judge_impl", "default")
+        if walton_judge_impl == "multistage":
+            return self._evaluate_multistage_judge(
+                eval_file, judge_model=judge_model, **judge_kwargs
+            )
+
         # Use GPT-4o-mini as judge for evaluation
         model = judge_kwargs.get("model", "gpt-4o-mini")
         suffix = eval_file.split(".")[-1]
