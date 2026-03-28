@@ -913,6 +913,8 @@ def evaluate_kfold(
         for i in range(start_k - 1, k):
             pred_col = f"prediction_{i+1}"
             verdict_col = f"verdict_{i+1}"
+            judge_stage_col = f"judge_stage_{i+1}"
+            judge_stage_detail_col = f"judge_stage_detail_{i+1}"
 
             logger.info(f"Evaluating prediction {i+1}/{k}")
 
@@ -922,6 +924,8 @@ def evaluate_kfold(
             # Create temporary dataframe for evaluation
             temp_df = df_predictions[["index", "question", "answer"]].copy()
             temp_df["prediction"] = df_predictions[pred_col]
+            keep_temp_file = False
+            eval_df_for_debug = None
 
             # Save to temporary file (always save for consistency)
             temp_df.to_excel(temp_file, index=False)
@@ -935,6 +939,7 @@ def evaluate_kfold(
                 # Extract verdicts
                 loaded_from_file = False
                 if isinstance(eval_result, pd.DataFrame):
+                    eval_df_for_debug = eval_result
                     # Merge verdict into results
                     if "verdict" in eval_result.columns:
                         results[verdict_col] = eval_result["verdict"].values
@@ -962,6 +967,7 @@ def evaluate_kfold(
                                 isinstance(eval_df, pd.DataFrame)
                                 and "verdict" in eval_df.columns
                             ):
+                                eval_df_for_debug = eval_df
                                 results[verdict_col] = eval_df["verdict"].values
                                 logger.info(
                                     f"Loaded {len(eval_df)} verdicts for prediction {i+1} from {osp.basename(result_path)}"
@@ -979,6 +985,23 @@ def evaluate_kfold(
                                 f"Unexpected evaluation result format for prediction {i+1}; defaulting verdicts to 0"
                             )
                         results[verdict_col] = 0
+
+                if isinstance(eval_df_for_debug, pd.DataFrame):
+                    if "judge_stage" in eval_df_for_debug.columns:
+                        results[judge_stage_col] = eval_df_for_debug["judge_stage"].values
+                        temp_df["judge_stage"] = eval_df_for_debug["judge_stage"].values
+                        keep_temp_file = True
+                    if "judge_stage_detail" in eval_df_for_debug.columns:
+                        results[judge_stage_detail_col] = eval_df_for_debug[
+                            "judge_stage_detail"
+                        ].values
+                        temp_df["judge_stage_detail"] = eval_df_for_debug[
+                            "judge_stage_detail"
+                        ].values
+                        keep_temp_file = True
+                    if keep_temp_file:
+                        temp_df["verdict"] = results[verdict_col].values
+                        temp_df.to_excel(temp_file, index=False)
 
                 # Save intermediate results after each prediction evaluation
                 intermediate_file = osp.join(
@@ -998,8 +1021,8 @@ def evaluate_kfold(
                 raise
 
             finally:
-                # Clean up temp file but keep the cached result for potential recovery
-                if osp.exists(temp_file):
+                # Keep enriched temp files when they contain per-row judge stage metadata.
+                if osp.exists(temp_file) and not keep_temp_file:
                     os.remove(temp_file)
 
     finally:

@@ -240,19 +240,23 @@ class WaltonMultimodalReasoning(ImageBaseDataset):
         return bool(left_norm) and left_norm == right_norm
 
     def _deterministic_verdict(self, prediction, answer, question_text=None):
-        """Return 1 if deterministic normalization is sufficient, else None."""
+        """Return (verdict, stage_name, detail) if deterministic normalization is sufficient."""
         raw_prediction = str(prediction)
         raw_answer = str(answer)
 
         if self._texts_match_basic(raw_prediction, raw_answer):
-            return 1
+            return (1, "deterministic_raw_match", "Normalized raw prediction matches raw answer")
 
         choice_map = self._build_choice_map_for_qtext(question_text)
         extracted_prediction = self._extract_answer_text(raw_prediction)
         extracted_answer = self._extract_answer_text(raw_answer)
 
         if self._texts_match_basic(extracted_prediction, extracted_answer):
-            return 1
+            return (
+                1,
+                "deterministic_extracted_match",
+                f"Extracted answers match: pred={extracted_prediction!r}, answer={extracted_answer!r}",
+            )
 
         pred_label, pred_text = self._normalize_answer_with_choices(
             extracted_prediction, choice_map
@@ -268,15 +272,27 @@ class WaltonMultimodalReasoning(ImageBaseDataset):
             and len(ans_label) == 1
             and pred_label.upper() == ans_label.upper()
         ):
-            return 1
+            return (
+                1,
+                "deterministic_choice_label",
+                f"Choice labels match: pred={pred_label}, answer={ans_label}",
+            )
 
         if pred_text is not None and ans_text is not None and self._texts_match_basic(
             pred_text, ans_text
         ):
-            return 1
+            return (
+                1,
+                "deterministic_choice_text",
+                f"Choice texts match: pred={pred_text!r}, answer={ans_text!r}",
+            )
 
         if self._texts_match_basic(extracted_prediction, raw_answer):
-            return 1
+            return (
+                1,
+                "deterministic_extracted_to_raw",
+                f"Extracted prediction matches raw answer: pred={extracted_prediction!r}, answer={raw_answer!r}",
+            )
 
         return None
 
@@ -313,7 +329,7 @@ or
 
     def _parse_multistage_judge_response(self, response):
         if not isinstance(response, str):
-            return 0
+            return 0, "Non-string judge response"
 
         text = response.strip()
         try:
@@ -322,20 +338,23 @@ or
             elif "```" in text:
                 text = text.split("```", 1)[1].split("```", 1)[0]
             parsed = json.loads(text)
-            return 1 if parsed.get("equivalent", False) else 0
+            equivalent = parsed.get("equivalent", False)
+            reasoning = parsed.get("reasoning", "")
+            return (1 if equivalent else 0), f"json:{reasoning}"
         except Exception:
             pass
 
         match = re.search(r'\{[^}]*"equivalent"\s*:\s*(true|false)', response, flags=re.IGNORECASE)
         if match:
-            return 1 if match.group(1).lower() == "true" else 0
+            verdict = 1 if match.group(1).lower() == "true" else 0
+            return verdict, "regex_json_fallback"
 
         lowered = text.lower()
         if re.search(r"\bfalse\b", lowered) or re.search(r"\bnot equivalent\b", lowered):
-            return 0
+            return 0, "phrase_fallback_false"
         if re.search(r"\btrue\b", lowered) or re.search(r"\bequivalent\b", lowered):
-            return 1
-        return 0
+            return 1, "phrase_fallback_true"
+        return 0, "unparsed_response"
 
     def _run_judge_generation_batch(
         self,
@@ -395,76 +414,103 @@ or
                 )
 
             logger = get_logger("WALTON_EVAL")
-            verdict_list = []
+            verdict_list = [0] * len(data)
+            judge_stage_list = [""] * len(data)
+            judge_stage_detail_list = [""] * len(data)
             logged_sample = False
 
+            pending_requests = []
+            pending_meta = []
+
+            def flush_pending_requests():
+                nonlocal logged_sample, pending_requests, pending_meta
+                if not pending_requests:
+                    return
+
+                try:
+                    batch_responses = self._run_judge_generation_batch(
+                        judge_model=judge_model,
+                        prompts=pending_requests,
+                        use_vllm_judge=use_vllm_judge,
+                        judge_nproc=judge_nproc,
+                    )
+                except Exception as e:
+                    print(f"Error in multistage judge generation: {e}")
+                    batch_responses = [""] * len(pending_requests)
+
+                for meta, response in zip(pending_meta, batch_responses):
+                    verdict, detail = self._parse_multistage_judge_response(response)
+                    verdict_list[meta["abs_idx"]] = verdict
+                    judge_stage_list[meta["abs_idx"]] = "llm_multistage"
+                    judge_stage_detail_list[meta["abs_idx"]] = detail
+
+                    deterministic = self._deterministic_verdict(
+                        meta["prediction"],
+                        meta["answer"],
+                        meta["question"],
+                    )
+                    if deterministic is not None and deterministic[0] == 1 and verdict == 0:
+                        verdict_list[meta["abs_idx"]] = 1
+                        judge_stage_list[meta["abs_idx"]] = "llm_multistage_corrected_by_deterministic"
+                        judge_stage_detail_list[meta["abs_idx"]] = deterministic[2]
+
+                if not logged_sample and pending_requests:
+                    try:
+                        logger.info("=== First multistage Walton judge batch ===")
+                        for meta, prompt, response in zip(
+                            pending_meta[:3], pending_requests[:3], batch_responses[:3]
+                        ):
+                            logger.info(
+                                f"--- Judged Item (abs {meta['abs_idx']}) ---\nPrompt:\n{prompt}\n\nResponse:\n{str(response)}"
+                            )
+                    except Exception:
+                        pass
+                    logged_sample = True
+
+                pending_requests = []
+                pending_meta = []
+
             with tqdm(total=len(data), desc="Evaluating with multistage judge") as pbar:
-                for i in range(0, len(data), batch_size):
-                    batch_end = min(i + batch_size, len(data))
-                    batch_data = data.iloc[i:batch_end]
+                for abs_idx, (_, row) in enumerate(data.iterrows()):
+                    prediction = row.get("prediction", "")
+                    answer = row.get("answer", "")
+                    question = row.get("question", None)
+                    deterministic = self._deterministic_verdict(
+                        prediction,
+                        answer,
+                        question,
+                    )
 
-                    batch_prompts = []
-                    judge_indices = []
-                    batch_verdicts = [0] * len(batch_data)
-
-                    for rel_idx, (_, row) in enumerate(batch_data.iterrows()):
-                        deterministic = self._deterministic_verdict(
-                            row.get("prediction", ""),
-                            row.get("answer", ""),
-                            row.get("question", None),
-                        )
-                        if deterministic is not None:
-                            batch_verdicts[rel_idx] = deterministic
-                            continue
-
-                        judge_indices.append(rel_idx)
-                        batch_prompts.append(
+                    if deterministic is not None:
+                        verdict_list[abs_idx] = deterministic[0]
+                        judge_stage_list[abs_idx] = deterministic[1]
+                        judge_stage_detail_list[abs_idx] = deterministic[2]
+                    else:
+                        pending_requests.append(
                             self._create_multistage_judge_prompt(
-                                row.get("prediction", ""),
-                                row.get("answer", ""),
-                                row.get("question", None),
+                                prediction,
+                                answer,
+                                question,
                             )
                         )
-
-                    try:
-                        batch_responses = self._run_judge_generation_batch(
-                            judge_model=judge_model,
-                            prompts=batch_prompts,
-                            use_vllm_judge=use_vllm_judge,
-                            judge_nproc=judge_nproc,
+                        pending_meta.append(
+                            {
+                                "abs_idx": abs_idx,
+                                "prediction": prediction,
+                                "answer": answer,
+                                "question": question,
+                            }
                         )
-                    except Exception as e:
-                        print(f"Error in multistage judge generation: {e}")
-                        batch_responses = [""] * len(batch_prompts)
+                        if len(pending_requests) >= batch_size:
+                            flush_pending_requests()
 
-                    for rel_idx, response in zip(judge_indices, batch_responses):
-                        batch_verdicts[rel_idx] = self._parse_multistage_judge_response(response)
+                    pbar.update(1)
 
-                    for rel_idx, (_, row) in enumerate(batch_data.iterrows()):
-                        deterministic = self._deterministic_verdict(
-                            row.get("prediction", ""),
-                            row.get("answer", ""),
-                            row.get("question", None),
-                        )
-                        if deterministic == 1 and batch_verdicts[rel_idx] == 0:
-                            batch_verdicts[rel_idx] = 1
-
-                    if not logged_sample and (batch_prompts or any(v == 1 for v in batch_verdicts)):
-                        try:
-                            logger.info("=== First multistage Walton judge batch ===")
-                            for j, prompt in enumerate(batch_prompts[:3]):
-                                resp = batch_responses[j] if j < len(batch_responses) else ""
-                                logger.info(
-                                    f"--- Judged Item (rel {judge_indices[j]}) ---\nPrompt:\n{prompt}\n\nResponse:\n{str(resp)}"
-                                )
-                        except Exception:
-                            pass
-                        logged_sample = True
-
-                    verdict_list.extend(batch_verdicts)
-                    pbar.update(batch_end - i)
+                flush_pending_requests()
 
             data["verdict"] = verdict_list
+            data["judge_stage"] = judge_stage_list
+            data["judge_stage_detail"] = judge_stage_detail_list
             dump(data, result_path)
 
         data = load(result_path)
