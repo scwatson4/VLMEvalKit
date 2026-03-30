@@ -257,10 +257,14 @@ class ImageMCQDataset(ImageBaseDataset):
                 warnings.warn(DEBUG_MESSAGE)
                 model = None
         elif 'qwen' in model:
-            model = build_judge(**judge_kwargs)
-            if not model.working():
-                warnings.warn('QWEN API is not working properly, will use exact matching for evaluation')
-                warnings.warn(DEBUG_MESSAGE)
+            try:
+                model = build_judge(**judge_kwargs)
+                if not model.working():
+                    warnings.warn('QWEN API is not working properly, will use exact matching for evaluation')
+                    warnings.warn(DEBUG_MESSAGE)
+                    model = None
+            except Exception as e:
+                warnings.warn(f'Failed to load Qwen judge ({e}), will use exact matching for evaluation')
                 model = None
         else:
             warnings.warn('OPENAI_API_KEY is not set properly, will use exact matching for evaluation')

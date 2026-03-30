@@ -350,6 +350,7 @@ def is_vllm_compatible(detected_class: str, model_path: str) -> bool:
     # Check based on model class
     vllm_compatible_classes = {
         "Qwen2VLChat",  # Qwen2-VL and Qwen2.5-VL models
+        "Qwen3VLChat",  # Qwen3-VL models
         "llama4",       # Llama-4 models
         "molmo",        # Molmo models
         "Gemma3",       # Gemma models (in some configurations)

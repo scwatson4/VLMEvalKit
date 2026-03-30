@@ -16,6 +16,19 @@ VLLM_MAX_IMAGE_INPUT_NUM = 24
 
 def is_moe_model(model_path: str) -> bool:
     """Check if the model is a Mixture of Experts model."""
+    # First check config.json for num_experts (most reliable)
+    import json
+    config_path = os.path.join(model_path, "config.json")
+    if os.path.exists(config_path):
+        try:
+            with open(config_path) as f:
+                cfg = json.load(f)
+            num_experts = cfg.get("num_experts", 0)
+            if isinstance(num_experts, int):
+                return num_experts > 0
+        except Exception:
+            pass
+    # Fall back to path-name heuristic
     path_parts = model_path.split("/")
     non_moe_patterns = ["4B", "8B", "4b", "8b"]
     for part in path_parts:
