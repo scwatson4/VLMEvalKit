@@ -1,8 +1,9 @@
 # Molmo-7B SFT — Results Summary
 Last updated: 2026-03-31
 
-> **Pipeline status:** diverse_cluster eval running (~33h), exclude/hard_exclude queued.
-> Results below reflect all completed scoring as of this update.
+> **Pipeline status:** diverse_cluster eval blocked (~35h, OlympiadBench SymPy CPU eval stalled),
+> exclude_geo_bio_stats and hard_exclude_geo_bio_stats queued.
+> No new scores since 2026-03-30 13:02 UTC. Results below are all completed scoring to date.
 
 ---
 
@@ -95,11 +96,11 @@ matching, which almost never matches model outputs written in natural language.
 | Dataset | Samples | Score (SymPy-only) | Note |
 |---------|---------|-------------------|------|
 | atomic_dataset | 200 | **0.5%** (1/200) | SymPy fallback only |
-| electro_dataset | 242 | pending | qwen3-4b judge stalled |
-| mechanics_dataset | 221 | pending | — |
-| optics_dataset | 158 | pending | — |
-| quantum_dataset | 236 | pending | — |
-| statistics_dataset | 240 | pending | — |
+| electro_dataset | 242 | blocked | qwen3-4b pkl saved, score CSV not written — blocked by OlympiadBench SymPy |
+| mechanics_dataset | 221 | blocked | — |
+| optics_dataset | 158 | blocked | — |
+| quantum_dataset | 236 | blocked | — |
+| statistics_dataset | 240 | blocked | — |
 
 ---
 
