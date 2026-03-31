@@ -1,115 +1,132 @@
-# DCVLR Eval Summary — 2026-03-30
+# DCVLR Eval Summary — 2026-03-31
 
 ## Overview
 
 Training and evaluating 3 Qwen3-VL-8B-Instruct fine-tuned checkpoints on 10 benchmarks.
 All training uses seed 2025, 1 epoch, adafactor optimizer, lr=2e-5, no PEFT, no FSDP (single GPU).
 
-| # | Run Name | HF Dataset | HF Checkpoint | Training Status |
-|---|---|---|---|---|
-| 1 | qwen3vl_diverse_cluster | `yosubshin/WaltonMultimodalColdStart-diverse-1k-42` | `scw71432/qwen3vl-8b-diverse-cluster-seed2025` | ✅ Done |
-| 4 | qwen3vl_exclude_geo_bio_stats | `yosubshin/oumi-walton-exclude-geometry-biology-statistics` | `scw71432/qwen3vl-8b-exclude-geo-bio-stats-seed2025` | ✅ Done |
-| 9 | qwen3vl_hard_exclude_geo_bio_stats | `yosubshin/walton-hard-exclude-geometry-biology-statistics-1k-1` | `scw71432/qwen3vl-8b-hard-exclude-geo-bio-stats-seed2025` | ✅ Done |
+| # | Run Name | HF Dataset | HF Checkpoint | Training | Eval |
+|---|---|---|---|---|---|
+| 1 | qwen3vl_diverse_cluster | `yosubshin/WaltonMultimodalColdStart-diverse-1k-42` | `scw71432/qwen3vl-8b-diverse-cluster-seed2025` | ✅ | ✅ |
+| 4 | qwen3vl_exclude_geo_bio_stats | `yosubshin/oumi-walton-exclude-geometry-biology-statistics` | `scw71432/qwen3vl-8b-exclude-geo-bio-stats-seed2025` | ✅ | ✅ |
+| 9 | qwen3vl_hard_exclude_geo_bio_stats | `yosubshin/walton-hard-exclude-geometry-biology-statistics-1k-1` | `scw71432/qwen3vl-8b-hard-exclude-geo-bio-stats-seed2025` | ✅ | 🔄 |
 
 ---
 
-## Eval Status
+## Results Summary
 
-### Run 1 — `qwen3vl_diverse_cluster` (✅ Complete)
+> ⚠️ Physics dataset scores (atomic/electro/mechanics/optics/quantum/statistics) use **exact-match fallback** for all runs — the qwen3-4b judge OOMs alongside vllm. True scores will be higher after re-scoring with the standalone judge.
 
-| Benchmark | Score | Notes |
+### Non-Physics Benchmarks
+
+| Benchmark | Run 1 (diverse_cluster) | Run 2 (excl_geo_bio_stats) | Run 3 (hard_excl_geo_bio_stats) |
+|---|---|---|---|
+| VMCBench_DEV | **77.0%** | **74.9%** | 🔄 In progress |
+| LiveXivTQA | **77.27%** † | **75.87%** | ⏳ |
+| OlympiadBench AVG | **15.05%** | **14.49%** | ⏳ |
+| Omni3DBench YN | 52.0% | 49.3% | ⏳ |
+| Omni3DBench MC | 62.8% | 62.8% | ⏳ |
+| Omni3DBench count | 17.1% | 17.1% | ⏳ |
+| Omni3DBench other | 29.1% | 30.9% | ⏳ |
+
+† Run 1 LiveXivTQA scored via regex extraction of `\boxed{X}` (judge OOM'd); Run 2 scored by qwen3-4b judge.
+
+### Physics Datasets (⚠️ Exact-match fallback — needs re-scoring)
+
+| Benchmark | Run 1 | Run 2 | Run 3 |
+|---|---|---|---|
+| atomic | 2.5% | 3.0% | ⏳ |
+| electro | 1.24% | 0.0% | ⏳ |
+| mechanics | 0.0% | 0.0% | ⏳ |
+| optics | 1.27% | 0.63% | ⏳ |
+| quantum | 1.27% | 1.27% | ⏳ |
+| statistics | 1.67% | 1.67% | ⏳ |
+
+---
+
+## Detailed Scores
+
+### VMCBench_DEV Breakdown
+
+| Category | Run 1 | Run 2 |
 |---|---|---|
-| VMCBench_DEV | **77.0%** | Rule-based scorer |
-| LiveXivTQA | **77.27%** | Scored via regex extraction of `\boxed{X}` from predictions (judge OOM'd alongside vllm) |
-| OlympiadBench | **15.05%** AVG | math 21.22%, physics 3.32% — rule-based MathJudger |
-| Omni3DBench | See below | Rule-based scoring |
-| atomic_dataset | **2.5%** ⚠️ | Exact match fallback — needs re-scoring with standalone qwen3-4b judge |
-| electro_dataset | **1.24%** ⚠️ | Same |
-| mechanics_dataset | **0.0%** ⚠️ | Same |
-| optics_dataset | **1.27%** ⚠️ | Same |
-| quantum_dataset | **1.27%** ⚠️ | Same |
-| statistics_dataset | **1.67%** ⚠️ | Same |
+| **Overall** | **77.0%** | **74.9%** |
+| General | 81.4% | 83.1% |
+| Reasoning | 58.7% | 54.7% |
+| OCR | 94.0% | 93.0% |
+| Doc & Chart | 86.0% | 80.4% |
+| SEEDBench | 74.0% | 82.0% |
+| MMStar | 66.0% | 78.0% |
+| A-OKVQA | 88.0% | 84.0% |
+| VizWiz | 84.0% | 82.0% |
+| MMVet | 74.0% | 74.0% |
+| VQAv2 | 94.0% | 94.0% |
+| OKVQA | 90.0% | 88.0% |
+| MMMU | 52.0% | 46.0% |
+| MathVista | 52.0% | 52.0% |
+| ScienceQA | 86.0% | 80.0% |
+| RealWorldQA | 46.0% | 46.0% |
+| GQA | 76.0% | 72.0% |
+| MathVision | 40.0% | 32.0% |
+| TextVQA | 90.0% | 92.0% |
+| OCRVQA | 98.0% | 94.0% |
+| AI2D | 86.0% | 62.0% |
+| ChartQA | 88.0% | 86.0% |
+| DocVQA | 100.0% | 100.0% |
+| InfoVQA | 84.0% | 78.0% |
+| TableVQABench | 72.0% | 76.0% |
 
-**Omni3DBench breakdown:**
-| Metric | Score |
-|---|---|
-| Yes/No Accuracy | 52.0% |
-| Multiple Choice Accuracy | 62.8% |
-| Numeric (count) Accuracy | 17.1% |
-| Numeric (other) Mean Relative Accuracy | 29.1% |
+### OlympiadBench Breakdown
 
-**VMCBench_DEV breakdown:**
-| Category | Score |
-|---|---|
-| Overall | 77.0% |
-| General | 81.4% |
-| Reasoning | 58.7% |
-| OCR | 94.0% |
-| Doc & Chart | 86.0% |
-| SEEDBench | 74.0% |
-| MMStar | 66.0% |
-| A-OKVQA | 88.0% |
-| VizWiz | 84.0% |
-| MMVet | 74.0% |
-| VQAv2 | 94.0% |
-| OKVQA | 90.0% |
-| MMMU | 52.0% |
-| MathVista | 52.0% |
-| ScienceQA | 86.0% |
-| RealWorldQA | 46.0% |
-| GQA | 76.0% |
-| MathVision | 40.0% |
-| TextVQA | 90.0% |
-| OCRVQA | 98.0% |
-| AI2D | 86.0% |
-| ChartQA | 88.0% |
-| DocVQA | 100.0% |
-| InfoVQA | 84.0% |
-| TableVQABench | 72.0% |
-
----
-
-### Run 2 — `qwen3vl_exclude_geo_bio_stats` (🔄 In Progress — OlympiadBench inference ~12:03 UTC)
-
-| Benchmark | Score | Notes |
+| Subset | Run 1 | Run 2 |
 |---|---|---|
-| VMCBench_DEV | **74.9%** | ✅ |
-| LiveXivTQA | **75.87%** | ✅ qwen3-4b judge |
-| OlympiadBench | 🔄 In progress | — |
-| Omni3DBench | ⏳ Queued | — |
-| atomic_dataset | ⏳ Queued | — |
-| electro_dataset | ⏳ Queued | — |
-| mechanics_dataset | ⏳ Queued | — |
-| optics_dataset | ⏳ Queued | — |
-| quantum_dataset | ⏳ Queued | — |
-| statistics_dataset | ⏳ Queued | — |
+| OE_MM_maths_en_COMP | 23.3% | 25.3% |
+| OE_MM_maths_zh_CEE | 14.2% | 11.4% |
+| OE_MM_maths_zh_COMP | 12.5% | 12.5% |
+| OE_MM_physics_en_COMP | 3.5% | 3.9% |
+| OE_MM_physics_zh_CEE | 3.0% | 3.4% |
+| OE_TO_maths_en_COMP | 34.8% | 36.4% |
+| OE_TO_maths_zh_CEE | 26.3% | 25.8% |
+| OE_TO_maths_zh_COMP | 16.7% | 17.2% |
+| OE_TO_physics_en_COMP | 5.1% | 4.7% |
+| OE_TO_physics_zh_CEE | 2.6% | 0.9% |
+| zh_maths | 18.6% | 17.0% |
+| zh_physics | 3.0% | 3.3% |
+| en_maths | 32.7% | 34.4% |
+| en_physics | 4.0% | 4.2% |
+| maths | 21.2% | 20.3% |
+| physics | 3.3% | 3.5% |
+| **AVG** | **15.05%** | **14.49%** |
+
+### Omni3DBench Breakdown
+
+| Metric | Run 1 | Run 2 |
+|---|---|---|
+| Yes/No Accuracy | 52.0% | 49.3% |
+| Multiple Choice Accuracy | 62.8% | 62.8% |
+| Numeric (count) Accuracy | 17.1% | 17.1% |
+| Numeric (other) Mean Rel. Accuracy | 29.1% | 30.9% |
 
 ---
 
-### Run 3 — `qwen3vl_hard_exclude_geo_bio_stats` (⏳ Not started)
+## Run 3 Status — `qwen3vl_hard_exclude_geo_bio_stats` (🔄 In Progress)
 
-Checkpoint uploaded to HF. Blocked until Run 2 frees the GPUs.
+Eval launched 2026-03-30 22:53 UTC. Currently on VMCBench_DEV.
+ETA: ~15:00 UTC 2026-03-31.
 
 ---
 
-## Known Issues & Fixes Applied
+## Known Issues & Fixes
 
 | Issue | Fix | File |
 |---|---|---|
 | Custom Qwen3-VL checkpoints not recognized as vllm-compatible → flash_attention OOM | Added `Qwen3VLChat` to `vllm_compatible_classes` | `vlmeval/utils/model_detection.py` |
-| Non-MoE checkpoints (path has no `4B`/`8B`) incorrectly flagged as MoE → vllm init crash | `is_moe_model()` now reads `config.json` for `num_experts` first | `vlmeval/vlm/qwen3_vl/model.py` |
-| LiveXivTQA scoring crashes when qwen3-4b judge can't load (vllm holds all GPU memory) | Added try/except fallback to exact matching in `'qwen' in model` branch | `vlmeval/dataset/image_mcq.py` |
-| OlympiadBench scoring crashes on LaTeX parsing | Installed `antlr4-python3-runtime==4.11` in qwen3-eval env | — |
+| Non-MoE checkpoints incorrectly flagged as MoE → vllm init crash | `is_moe_model()` reads `config.json` for `num_experts` first | `vlmeval/vlm/qwen3_vl/model.py` |
+| LiveXivTQA scoring OOM when qwen3-4b judge loads alongside vllm | try/except fallback to exact matching | `vlmeval/dataset/image_mcq.py` |
+| OlympiadBench scoring crashes on LaTeX parsing | Installed `antlr4-python3-runtime==4.11` | — |
 
-### Physics Dataset Scoring Concern
-The physics scores for Run 1 (atomic 2.5%, electro 1.24%, mechanics 0.0%, optics 1.27%, quantum 1.27%, statistics 1.67%) are almost certainly **not** reflective of true model performance.
-The qwen3-4b judge OOMs when trying to load alongside the vllm inference model (~67 GiB GPU usage),
-so scoring falls back to strict exact string matching on free-form physics answers — which misses
-correct answers that are phrased differently or use different notation.
-
-**Next steps once all evals finish:**
-1. Re-score physics datasets for all 3 runs using the standalone scorer (`dcvlr_standalone_scorer.py`) with qwen3-4b judge run separately (no vllm conflict)
-2. Run Eval 3 once Run 2 frees the GPUs
+### Physics Scoring Issue
+All physics scores are near-zero because the qwen3-4b judge OOMs (~67 GiB vllm footprint) and falls back to strict exact string matching on free-form physics answers. Re-scoring with a standalone judge (no vllm running) is required for meaningful results.
 
 ---
 
