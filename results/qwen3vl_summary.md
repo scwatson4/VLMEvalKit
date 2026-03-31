@@ -21,15 +21,15 @@ All training uses seed 2025, 1 epoch, adafactor optimizer, lr=2e-5, no PEFT, no 
 
 | Benchmark | Run 1 (diverse_cluster) | Run 2 (excl_geo_bio_stats) | Run 3 (hard_excl_geo_bio_stats) |
 |---|---|---|---|
-| VMCBench_DEV | **77.0%** | **74.9%** | 🔄 In progress |
-| LiveXivTQA | **77.27%** † | **75.87%** | ⏳ |
-| OlympiadBench AVG | **15.05%** | **14.49%** | ⏳ |
+| VMCBench_DEV | **77.0%** | **74.9%** | **68.1%** |
+| LiveXivTQA | **77.27%** † | **75.87%** | **73.42%** |
+| OlympiadBench AVG | **15.05%** | **14.49%** | 🔄 In progress |
 | Omni3DBench YN | 52.0% | 49.3% | ⏳ |
 | Omni3DBench MC | 62.8% | 62.8% | ⏳ |
 | Omni3DBench count | 17.1% | 17.1% | ⏳ |
 | Omni3DBench other | 29.1% | 30.9% | ⏳ |
 
-† Run 1 LiveXivTQA scored via regex extraction of `\boxed{X}` (judge OOM'd); Run 2 scored by qwen3-4b judge.
+† Run 1 LiveXivTQA scored via regex extraction of `\boxed{X}` (judge OOM'd); Runs 2 & 3 scored by qwen3-4b judge.
 
 ### Physics Datasets (⚠️ Exact-match fallback — needs re-scoring)
 
@@ -48,70 +48,70 @@ All training uses seed 2025, 1 epoch, adafactor optimizer, lr=2e-5, no PEFT, no 
 
 ### VMCBench_DEV Breakdown
 
-| Category | Run 1 | Run 2 |
-|---|---|---|
-| **Overall** | **77.0%** | **74.9%** |
-| General | 81.4% | 83.1% |
-| Reasoning | 58.7% | 54.7% |
-| OCR | 94.0% | 93.0% |
-| Doc & Chart | 86.0% | 80.4% |
-| SEEDBench | 74.0% | 82.0% |
-| MMStar | 66.0% | 78.0% |
-| A-OKVQA | 88.0% | 84.0% |
-| VizWiz | 84.0% | 82.0% |
-| MMVet | 74.0% | 74.0% |
-| VQAv2 | 94.0% | 94.0% |
-| OKVQA | 90.0% | 88.0% |
-| MMMU | 52.0% | 46.0% |
-| MathVista | 52.0% | 52.0% |
-| ScienceQA | 86.0% | 80.0% |
-| RealWorldQA | 46.0% | 46.0% |
-| GQA | 76.0% | 72.0% |
-| MathVision | 40.0% | 32.0% |
-| TextVQA | 90.0% | 92.0% |
-| OCRVQA | 98.0% | 94.0% |
-| AI2D | 86.0% | 62.0% |
-| ChartQA | 88.0% | 86.0% |
-| DocVQA | 100.0% | 100.0% |
-| InfoVQA | 84.0% | 78.0% |
-| TableVQABench | 72.0% | 76.0% |
+| Category | Run 1 | Run 2 | Run 3 |
+|---|---|---|---|
+| **Overall** | **77.0%** | **74.9%** | **68.1%** |
+| General | 81.4% | 83.1% | 77.7% |
+| Reasoning | 58.7% | 54.7% | 50.3% |
+| OCR | 94.0% | 93.0% | 93.0% |
+| Doc & Chart | 86.0% | 80.4% | 66.0% |
+| SEEDBench | 74.0% | 82.0% | 76.0% |
+| MMStar | 66.0% | 78.0% | 64.0% |
+| A-OKVQA | 88.0% | 84.0% | 86.0% |
+| VizWiz | 84.0% | 82.0% | 86.0% |
+| MMVet | 74.0% | 74.0% | 66.0% |
+| VQAv2 | 94.0% | 94.0% | 84.0% |
+| OKVQA | 90.0% | 88.0% | 82.0% |
+| MMMU | 52.0% | 46.0% | 48.0% |
+| MathVista | 52.0% | 52.0% | 38.0% |
+| ScienceQA | 86.0% | 80.0% | 62.0% |
+| RealWorldQA | 46.0% | 46.0% | 50.0% |
+| GQA | 76.0% | 72.0% | 76.0% |
+| MathVision | 40.0% | 32.0% | 28.0% |
+| TextVQA | 90.0% | 92.0% | 90.0% |
+| OCRVQA | 98.0% | 94.0% | 96.0% |
+| AI2D | 86.0% | 62.0% | 42.0% |
+| ChartQA | 88.0% | 86.0% | 68.0% |
+| DocVQA | 100.0% | 100.0% | 88.0% |
+| InfoVQA | 84.0% | 78.0% | 76.0% |
+| TableVQABench | 72.0% | 76.0% | 56.0% |
 
 ### OlympiadBench Breakdown
 
-| Subset | Run 1 | Run 2 |
-|---|---|---|
-| OE_MM_maths_en_COMP | 23.3% | 25.3% |
-| OE_MM_maths_zh_CEE | 14.2% | 11.4% |
-| OE_MM_maths_zh_COMP | 12.5% | 12.5% |
-| OE_MM_physics_en_COMP | 3.5% | 3.9% |
-| OE_MM_physics_zh_CEE | 3.0% | 3.4% |
-| OE_TO_maths_en_COMP | 34.8% | 36.4% |
-| OE_TO_maths_zh_CEE | 26.3% | 25.8% |
-| OE_TO_maths_zh_COMP | 16.7% | 17.2% |
-| OE_TO_physics_en_COMP | 5.1% | 4.7% |
-| OE_TO_physics_zh_CEE | 2.6% | 0.9% |
-| zh_maths | 18.6% | 17.0% |
-| zh_physics | 3.0% | 3.3% |
-| en_maths | 32.7% | 34.4% |
-| en_physics | 4.0% | 4.2% |
-| maths | 21.2% | 20.3% |
-| physics | 3.3% | 3.5% |
-| **AVG** | **15.05%** | **14.49%** |
+| Subset | Run 1 | Run 2 | Run 3 |
+|---|---|---|---|
+| OE_MM_maths_en_COMP | 23.3% | 25.3% | ⏳ |
+| OE_MM_maths_zh_CEE | 14.2% | 11.4% | ⏳ |
+| OE_MM_maths_zh_COMP | 12.5% | 12.5% | ⏳ |
+| OE_MM_physics_en_COMP | 3.5% | 3.9% | ⏳ |
+| OE_MM_physics_zh_CEE | 3.0% | 3.4% | ⏳ |
+| OE_TO_maths_en_COMP | 34.8% | 36.4% | ⏳ |
+| OE_TO_maths_zh_CEE | 26.3% | 25.8% | ⏳ |
+| OE_TO_maths_zh_COMP | 16.7% | 17.2% | ⏳ |
+| OE_TO_physics_en_COMP | 5.1% | 4.7% | ⏳ |
+| OE_TO_physics_zh_CEE | 2.6% | 0.9% | ⏳ |
+| zh_maths | 18.6% | 17.0% | ⏳ |
+| zh_physics | 3.0% | 3.3% | ⏳ |
+| en_maths | 32.7% | 34.4% | ⏳ |
+| en_physics | 4.0% | 4.2% | ⏳ |
+| maths | 21.2% | 20.3% | ⏳ |
+| physics | 3.3% | 3.5% | ⏳ |
+| **AVG** | **15.05%** | **14.49%** | ⏳ |
 
 ### Omni3DBench Breakdown
 
-| Metric | Run 1 | Run 2 |
-|---|---|---|
-| Yes/No Accuracy | 52.0% | 49.3% |
-| Multiple Choice Accuracy | 62.8% | 62.8% |
-| Numeric (count) Accuracy | 17.1% | 17.1% |
-| Numeric (other) Mean Rel. Accuracy | 29.1% | 30.9% |
+| Metric | Run 1 | Run 2 | Run 3 |
+|---|---|---|---|
+| Yes/No Accuracy | 52.0% | 49.3% | ⏳ |
+| Multiple Choice Accuracy | 62.8% | 62.8% | ⏳ |
+| Numeric (count) Accuracy | 17.1% | 17.1% | ⏳ |
+| Numeric (other) Mean Rel. Accuracy | 29.1% | 30.9% | ⏳ |
 
 ---
 
 ## Run 3 Status — `qwen3vl_hard_exclude_geo_bio_stats` (🔄 In Progress)
 
-Eval launched 2026-03-30 22:53 UTC. Currently on VMCBench_DEV.
+Eval launched 2026-03-30 22:53 UTC. OlympiadBench inference in progress as of 05:31 UTC 2026-03-31.
 ETA: ~15:00 UTC 2026-03-31.
 
 ---
